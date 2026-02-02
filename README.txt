@@ -1,6 +1,5 @@
 PoxNora Tracker (One-Click)
 
-1) Double-click run.bat
 2) Browser opens -> log in -> go to Match History
 3) Press Enter in the black window
 4) Results appear in the /output folder:
@@ -10,3 +9,4 @@ PoxNora Tracker (One-Click)
    - poxnora_summary.csv
 
 To change account name: edit config.json -> "player"
+
