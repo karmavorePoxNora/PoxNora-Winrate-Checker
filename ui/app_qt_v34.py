@@ -14,6 +14,27 @@ from typing import Any, Callable, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
+# --- Static imports to help PyInstaller discover optional builder modules ---
+# (The app also supports dynamic imports via _try_import_callable, but PyInstaller
+# can miss those without an explicit reference.)
+try:
+    import core.dashboard_png_v26  # noqa: F401
+except Exception:
+    pass
+try:
+    import core.report_html_v26  # noqa: F401
+except Exception:
+    pass
+try:
+    import core.dashboard_png  # noqa: F401
+except Exception:
+    pass
+try:
+    import core.report_html  # noqa: F401
+except Exception:
+    pass
+
+
 try:
     from ui.pg_dashboard_v34 import LiveDashboard  # type: ignore
 except Exception:
@@ -118,6 +139,22 @@ def _safe_open_path(path: Path) -> bool:
         return QDesktopServices.openUrl(_to_file_url(path))
     except Exception:
         return False
+
+
+def _newest_file(folder: Path, patterns: list[str]) -> Optional[Path]:
+    """Return newest file in folder matching any glob pattern (by mtime)."""
+    try:
+        if not folder.exists() or not folder.is_dir():
+            return None
+        files: list[Path] = []
+        for pat in patterns:
+            files.extend([p for p in folder.glob(pat) if p.is_file()])
+        if not files:
+            return None
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return files[0]
+    except Exception:
+        return None
 
 
 def _try_import_callable(module_name: str, candidates: list[str]) -> Optional[Callable[..., Any]]:
@@ -1594,7 +1631,7 @@ class AppWindow(QtWidgets.QMainWindow):
 
         try:
             shutil.copy2(src, dest)
-            self._set_active_dataset(dest, trigger_build=False)
+            self._set_active_dataset(dest, trigger_build=True)
         except Exception as e:
             self.log(f"Import CSV failed: {e}")
             self.log(traceback.format_exc())
@@ -1602,9 +1639,11 @@ class AppWindow(QtWidgets.QMainWindow):
 
 
     def on_build_only(self) -> None:
-        # --- AUTO LOAD SELECTED DATASET FIRST ---
-        if self.page_home.combo_dataset.currentIndex() >= 0:
-            self.load_selected_dataset()
+        # Prefer the currently active CSV (e.g., from a just-finished scrape).
+        # Only auto-load the combo selection if we don't have a valid active CSV yet.
+        if not (self.current_csv_path and self.current_csv_path.exists()):
+            if self.page_home.combo_dataset.currentIndex() >= 0:
+                self.load_selected_dataset()
 
         # Ensure we have an active dataset
         if not (self.current_csv_path and self.current_csv_path.exists()):
@@ -1667,6 +1706,18 @@ class AppWindow(QtWidgets.QMainWindow):
                 "generate_dashboard_png",
             ],
         )
+        # Fallback: some bundles place the builder at top-level
+        if png_builder is None:
+            png_builder = _try_import_callable(
+                "dashboard_png_v26",
+                candidates=[
+                    "build_dashboard_png",
+                    "build_png",
+                    "build_dashboard",
+                    "render_dashboard_png",
+                    "generate_dashboard_png",
+                ],
+            )
         report_builder = _try_import_callable(
             "core.report_html_v26",
             candidates=[
@@ -1677,6 +1728,18 @@ class AppWindow(QtWidgets.QMainWindow):
                 "generate_report_html",
             ],
         )
+        # Fallback: some bundles place the builder at top-level
+        if report_builder is None:
+            report_builder = _try_import_callable(
+                "report_html_v26",
+                candidates=[
+                    "build_report_html",
+                    "build_html",
+                    "build_report",
+                    "render_report_html",
+                    "generate_report_html",
+                ],
+            )
 
         player = (self.player_name or '').strip() or None
 
@@ -1763,24 +1826,44 @@ class AppWindow(QtWidgets.QMainWindow):
             self.log("Open Output Folder: failed to open.")
 
     def on_open_png(self) -> None:
+        # Prefer canonical filename, else newest PNG in output, else prompt to build first.
         path = self.paths.png_path
-        if not path.exists():
-            self.log("Open Dashboard PNG: dashboard.png not found.")
+        if path.exists():
+            ok = _safe_open_path(path)
+            if not ok:
+                self.log("Open Dashboard PNG: failed to open with system handler.")
             return
-        ok = _safe_open_path(path)
-        if not ok:
-            self.log("Open Dashboard PNG: failed to open with system handler.")
+
+        fallback = _newest_file(self.paths.output_dir, ["*.png"])
+        if fallback is not None and fallback.exists():
+            self.log(f"Open Dashboard PNG: canonical dashboard.png missing; opening newest: {fallback.name}")
+            ok = _safe_open_path(fallback)
+            if not ok:
+                self.log("Open Dashboard PNG: failed to open with system handler.")
+            return
+
+        self.log("Open Dashboard PNG: nothing to open. Click Build Only first.")
 
     def on_open_report(self) -> None:
+        # Prefer canonical filename, else newest HTML in output, else prompt to build first.
         path = self.paths.report_path
-        if not path.exists():
-            self.log("Open Report HTML: report.html not found.")
+        if path.exists():
+            ok = QDesktopServices.openUrl(_to_file_url(path))
+            if not ok:
+                self.log("Open Report HTML: failed to open in browser.")
             return
-        ok = QDesktopServices.openUrl(_to_file_url(path))
-        if not ok:
-            self.log("Open Report HTML: failed to open in browser.")
 
-    # ---------- Scrape controls ----------
+        fallback = _newest_file(self.paths.output_dir, ["*.html", "*.htm"])
+        if fallback is not None and fallback.exists():
+            self.log(f"Open Report HTML: canonical report.html missing; opening newest: {fallback.name}")
+            ok = QDesktopServices.openUrl(_to_file_url(fallback))
+            if not ok:
+                self.log("Open Report HTML: failed to open in browser.")
+            return
+
+        self.log("Open Report HTML: nothing to open. Click Build Only first.")
+
+# ---------- Scrape controls ----------
     def _scrape_all(self) -> None:
         self._start_scrape(mode="all", target_new=0)
 
@@ -1859,9 +1942,17 @@ class AppWindow(QtWidgets.QMainWindow):
         def on_done(path_str: str) -> None:
             self.page_scrape.set_running(False)
             self.page_scrape.set_waiting_for_continue(False)
-            self.current_csv_path = Path(path_str)
+            p = Path(path_str)
             self.log(f"✅ Scrape done: {path_str}")
-            self._refresh_home()
+            try:
+                # Set active dataset AND auto-build PNG/HTML so the app is immediately "ready to go".
+                self._set_active_dataset(p, trigger_build=True)
+            except Exception as e:
+                self.log(f"Auto-build after scrape failed: {e}")
+                self.log(traceback.format_exc())
+                # Still refresh UI even if build fails
+                self.current_csv_path = p
+                self._refresh_home()
 
         def on_error(msg: str) -> None:
             self.page_scrape.set_running(False)
