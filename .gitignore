@@ -1,0 +1,12 @@
+﻿# Build artifacts
+build/
+dist/
+output/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
